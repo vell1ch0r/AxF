@@ -1,0 +1,44 @@
+# Local reference material and extracted paper text
+paper/
+paper_text/
+
+# Runtime workspace artifacts
+workspace/*
+!workspace/.gitkeep
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local C/C++ source trees and generated metadata databases
+linux-*/
+**/.vscode/BROWSE.VC.DB
+**/.vscode/BROWSE.VC.DB-*
+**/.vscode/*.db
+**/.vscode/*.DB
+**/.vscode/*.sqlite
+**/.vscode/*.sqlite3
+
+# Generated source-analysis bundles
+*_source_bundle.c
+*_bundle.c
+tests/fixtures/
+
+# Virtual environments and local environment files
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Editor and OS noise
+.vscode/
+!.vscode/settings.example.json
+.idea/
+.DS_Store
+Thumbs.db
