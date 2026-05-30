@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = Path(__file__).with_name("static")
 DEFAULT_WORKSPACE = PROJECT_ROOT / "workspace" / "web" / "tasks"
+HARNESS_AGENT_ARTIFACT = "harness_generation_agent"
 
 
 @dataclass(frozen=True)
@@ -173,7 +174,7 @@ class TaskStore:
             self._event(
                 task_id,
                 step.name,
-                f"[{index}/{len(steps)}] 正在抽取：{_artifact_label(step.artifact_name)}",
+                f"[{index}/{len(steps)}] {_step_action_label(step.artifact_name)}：{_artifact_label(step.artifact_name)}",
                 artifact=step.artifact_name,
             )
             self._log(task_id, "$ " + " ".join(step.command))
@@ -185,6 +186,8 @@ class TaskStore:
                 self._event(task_id, status, f"{_artifact_label(step.artifact_name)} 退出码：{returncode}")
                 return
             self._set(task_id, artifact=(step.artifact_name, step.artifact_path))
+            for artifact_name, artifact_path in _extra_artifacts_for_step(step):
+                self._set(task_id, artifact=(artifact_name, artifact_path))
             self._event(task_id, step.name, f"{_artifact_label(step.artifact_name)} 已完成", artifact=step.artifact_name)
 
         self._set(task_id, status="completed", returncode=0)
@@ -225,6 +228,7 @@ def build_steps(config: dict[str, Any], task_dir: Path) -> list[PipelineStep]:
     selected = _selected_artifacts(config)
     if not selected:
         raise ValueError("请至少选择一个抽取产物")
+    wants_harness_agent = _has_harness_agent(selected)
 
     common = ["--repo", repo]
     _add_optional(common, "--db", config.get("db"))
@@ -238,7 +242,7 @@ def build_steps(config: dict[str, Any], task_dir: Path) -> list[PipelineStep]:
         steps.append(
             _capture_step("report_md", task_dir / "report.md", ["report", function, *common])
         )
-    if "report_json" in selected:
+    if "report_json" in selected or wants_harness_agent:
         steps.append(
             _capture_step("report_json", task_dir / "report.json", ["report", function, *common, "--format", "json"])
         )
@@ -246,18 +250,56 @@ def build_steps(config: dict[str, Any], task_dir: Path) -> list[PipelineStep]:
         output = task_dir / f"{function}_source_bundle.c"
         command = _base_command("source", function, *common, "--output", str(output))
         steps.append(PipelineStep("source", command, "source", output, capture_stdout=False))
-    if "subsource" in selected:
+    if "subsource" in selected or wants_harness_agent:
         output = task_dir / f"{function}_subsource_bundle.c"
         command = _base_command("subsource", function, *common, "--output", str(output))
         _add_optional(command, "--max-depth", config.get("max_depth"))
         _add_optional(command, "--max-functions", config.get("max_functions"))
         steps.append(PipelineStep("subsource", command, "subsource", output, capture_stdout=False))
-    if "calls" in selected:
+    if "calls" in selected or wants_harness_agent:
         command = ["calls", function, *common]
         _add_optional(command, "--max-depth", config.get("call_depth"))
         steps.append(_capture_step("calls", task_dir / "calls.txt", command))
-    if "params" in selected:
+    if "params" in selected or wants_harness_agent:
         steps.append(_capture_step("params", task_dir / "params.txt", ["params", function, *common]))
+    if wants_harness_agent:
+        harness_dir = task_dir / "harness"
+        command = [
+            sys.executable,
+            "-m",
+            "agents.harness_generation.agent",
+            "--function",
+            function,
+            "--repo",
+            repo,
+            "--task-dir",
+            str(task_dir),
+            "--report-json",
+            str(task_dir / "report.json"),
+            "--subsource",
+            str(task_dir / f"{function}_subsource_bundle.c"),
+            "--calls",
+            str(task_dir / "calls.txt"),
+            "--params",
+            str(task_dir / "params.txt"),
+            "--out",
+            str(harness_dir),
+            "--artifact",
+            str(task_dir / "generated_harness.txt"),
+        ]
+        _add_optional(command, "--file", config.get("file"))
+        _add_optional(command, "--model", config.get("model"))
+        _add_optional(command, "--chat-url", config.get("chat_url"))
+        _add_optional(command, "--api-key-env", config.get("api_key_env"))
+        steps.append(
+            PipelineStep(
+                HARNESS_AGENT_ARTIFACT,
+                command,
+                HARNESS_AGENT_ARTIFACT,
+                task_dir / "generated_harness.txt",
+                capture_stdout=False,
+            )
+        )
     return steps
 
 
@@ -267,7 +309,10 @@ def default_config() -> dict[str, Any]:
         "db": "",
         "function": "can_send",
         "file": "net/can/af_can.c",
-        "artifacts": ["report_md", "report_json", "subsource", "calls", "params"],
+        "artifacts": ["report_md", "report_json", "subsource", "calls", "params", HARNESS_AGENT_ARTIFACT],
+        "model": "glm-5.1",
+        "chat_url": "",
+        "api_key_env": "API_KEY",
         "max_deps": 50,
         "max_candidates": 12,
         "max_snippet_lines": 120,
@@ -438,6 +483,10 @@ def _selected_artifacts(config: dict[str, Any]) -> set[str]:
     return set(default_config()["artifacts"])
 
 
+def _has_harness_agent(selected: set[str]) -> bool:
+    return HARNESS_AGENT_ARTIFACT in selected
+
+
 def _required(config: dict[str, Any], key: str) -> str:
     value = str(config.get(key) or "").strip()
     if not value:
@@ -453,7 +502,35 @@ def _artifact_label(name: str) -> str:
         "subsource": "下游源码包",
         "calls": "上层调用链",
         "params": "入参约束",
+        HARNESS_AGENT_ARTIFACT: "Harness 生成 Agent",
+        "fuzz_harness": "Fuzz 驱动 harness.c",
+        "harness_mocks_h": "Mock 头文件",
+        "harness_mocks_c": "Mock 源文件",
+        "harness_build_sh": "Unix 构建脚本",
+        "harness_build_ps1": "Windows 构建脚本",
+        "harness_spec": "Harness 规格",
+        "harness_dict": "Fuzz 字典",
     }.get(name, name)
+
+
+def _step_action_label(name: str) -> str:
+    return "正在运行" if name == HARNESS_AGENT_ARTIFACT else "正在抽取"
+
+
+def _extra_artifacts_for_step(step: PipelineStep) -> list[tuple[str, Path]]:
+    if step.artifact_name != HARNESS_AGENT_ARTIFACT:
+        return []
+    harness_dir = step.artifact_path.parent / "harness"
+    candidates = [
+        ("fuzz_harness", harness_dir / "harness.c"),
+        ("harness_mocks_h", harness_dir / "mocks.h"),
+        ("harness_mocks_c", harness_dir / "mocks.c"),
+        ("harness_build_sh", harness_dir / "build.sh"),
+        ("harness_build_ps1", harness_dir / "build.ps1"),
+        ("harness_spec", harness_dir / "harness_spec.json"),
+        ("harness_dict", harness_dir / "dict.txt"),
+    ]
+    return [(name, path) for name, path in candidates if path.exists()]
 
 
 def _add_optional(command: list[str], flag: str, value: object) -> None:

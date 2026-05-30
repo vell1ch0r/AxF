@@ -30,6 +30,14 @@ const PHASE_LABELS = {
   subsource: "下游源码包",
   calls: "上层调用链",
   params: "入参约束",
+  harness_generation_agent: "Harness 生成 Agent",
+  fuzz_harness: "Fuzz 驱动 harness.c",
+  harness_mocks_h: "Mock 头文件",
+  harness_mocks_c: "Mock 源文件",
+  harness_build_sh: "Unix 构建脚本",
+  harness_build_ps1: "Windows 构建脚本",
+  harness_spec: "Harness 规格",
+  harness_dict: "Fuzz 字典",
   complete: "完成",
   failed: "失败",
   cancelled: "已停止",
@@ -43,6 +51,14 @@ const ARTIFACT_LABELS = {
   subsource: "下游源码包",
   calls: "上层调用链",
   params: "入参约束",
+  harness_generation_agent: "Harness 生成 Agent",
+  fuzz_harness: "Fuzz 驱动 harness.c",
+  harness_mocks_h: "Mock 头文件",
+  harness_mocks_c: "Mock 源文件",
+  harness_build_sh: "Unix 构建脚本",
+  harness_build_ps1: "Windows 构建脚本",
+  harness_spec: "Harness 规格",
+  harness_dict: "Fuzz 字典",
 };
 
 async function api(path, options = {}) {
@@ -71,6 +87,9 @@ function applyDefaults(defaults) {
   setField("db", defaults.db);
   setField("function", defaults.function);
   setField("file", defaults.file);
+  setField("model", defaults.model);
+  setField("chat_url", defaults.chat_url);
+  setField("api_key_env", defaults.api_key_env);
   setField("max_deps", defaults.max_deps);
   setField("max_snippet_lines", defaults.max_snippet_lines);
   setField("max_depth", defaults.max_depth);
@@ -100,7 +119,7 @@ function setTask(task) {
   statusBadge.textContent = STATUS_LABELS[status] || status;
   statusBadge.className = `badge ${status}`;
   cancelButton.disabled = !task || !["queued", "running"].includes(task.status);
-  taskTitle.textContent = task ? `${task.id} -> ${task.config.function || ""}` : "未开始";
+  taskTitle.textContent = task ? taskDisplayName(task) : "未开始";
 }
 
 function renderTask(task) {
@@ -163,10 +182,59 @@ function renderTaskList(tasks) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "item";
-    button.innerHTML = `<strong>${escapeHtml(task.id)} - ${escapeHtml(STATUS_LABELS[task.status] || task.status)}</strong><span class="muted">${escapeHtml(task.task_dir)}</span>`;
+    button.innerHTML = taskListItemHtml(task);
     button.addEventListener("click", () => selectTask(task.id));
     taskList.appendChild(button);
   }
+}
+
+function taskListItemHtml(task) {
+  return [
+    `<div class="item-head">`,
+    `<strong>${escapeHtml(taskDisplayName(task))}</strong>`,
+    `<span class="mini-badge ${escapeHtml(task.status)}">${escapeHtml(STATUS_LABELS[task.status] || task.status)}</span>`,
+    `</div>`,
+    `<div class="task-summary">${escapeHtml(taskPipelineSummary(task))}</div>`,
+    `<div class="muted">${escapeHtml(taskDetail(task))}</div>`,
+  ].join("");
+}
+
+function taskDisplayName(task) {
+  const config = task.config || {};
+  const func = config.function || "未命名函数";
+  return config.file ? `${func} (${config.file})` : func;
+}
+
+function taskPipelineSummary(task) {
+  const config = task.config || {};
+  const selected = new Set(config.artifacts || []);
+  const artifacts = task.artifacts || {};
+  const stages = [];
+  const hasAgent = selected.has("harness_generation_agent") || artifacts.harness_generation_agent || artifacts.fuzz_harness;
+  const hasKnowledge = hasAgent || ["report_json", "subsource", "calls", "params"].some((name) => selected.has(name) || artifacts[name]);
+  const hasHarness = Boolean(artifacts.fuzz_harness || artifacts.harness_generation_agent);
+
+  if (hasKnowledge) {
+    stages.push("知识抽取");
+  }
+  if (hasAgent) {
+    stages.push(hasHarness ? "Harness 已生成" : "Harness 生成 Agent");
+  }
+  if (!stages.length) {
+    stages.push("自定义任务");
+  }
+
+  const artifactCount = Object.keys(artifacts).length;
+  const suffix = artifactCount ? ` · ${artifactCount} 个产物` : "";
+  return stages.join(" -> ") + suffix;
+}
+
+function taskDetail(task) {
+  const parts = [`ID ${task.id}`];
+  if (task.task_dir) {
+    parts.push(`目录 ${task.task_dir}`);
+  }
+  return parts.join(" · ");
 }
 
 async function selectTask(taskId) {
