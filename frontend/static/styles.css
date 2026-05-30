@@ -244,6 +244,11 @@ input:focus {
   color: var(--danger);
 }
 
+.badge.warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
 .tabs {
   margin-top: 18px;
   border-bottom: 1px solid var(--line);
@@ -305,6 +310,15 @@ pre {
   margin-bottom: 12px;
 }
 
+.artifact-group-title {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #f7faf9;
+  color: var(--accent-dark);
+  font-size: 13px;
+  font-weight: 780;
+}
+
 .item {
   width: 100%;
   padding: 12px 14px;
@@ -344,6 +358,13 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.task-target {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .mini-badge {
   flex: 0 0 auto;
   min-width: 64px;
@@ -372,6 +393,11 @@ pre {
 .mini-badge.cancelled {
   background: #fee2e2;
   color: var(--danger);
+}
+
+.mini-badge.warning {
+  background: #fef3c7;
+  color: #92400e;
 }
 
 .muted {

@@ -61,12 +61,32 @@
               API Key 环境变量
               <input name="api_key_env" placeholder="API_KEY" />
             </label>
+            <label>
+              模型超时秒数
+              <input name="model_timeout" inputmode="numeric" />
+            </label>
+            <label>
+              模型重试次数
+              <input name="model_max_retries" inputmode="numeric" />
+            </label>
+            <label>
+              Clang 路径
+              <input name="clang" placeholder="留空使用 CLANG 或 clang" />
+            </label>
+            <label>
+              最大修复轮数
+              <input name="max_repair_rounds" inputmode="numeric" />
+            </label>
+            <label>
+              编译超时秒数
+              <input name="compile_timeout" inputmode="numeric" />
+            </label>
           </section>
 
           <section>
             <div class="section-title">
-              <h2>抽取产物</h2>
-              <span>可多选</span>
+              <h2>kRepo 知识抽取</h2>
+              <span>产物</span>
             </div>
             <label class="check"><input type="checkbox" name="artifacts" value="report_md" />Markdown 报告</label>
             <label class="check"><input type="checkbox" name="artifacts" value="report_json" />JSON 报告</label>
@@ -74,12 +94,19 @@
             <label class="check"><input type="checkbox" name="artifacts" value="source" />源码分析包</label>
             <label class="check"><input type="checkbox" name="artifacts" value="calls" />上层调用链</label>
             <label class="check"><input type="checkbox" name="artifacts" value="params" />入参约束</label>
-            <label class="check"><input type="checkbox" name="artifacts" value="harness_generation_agent" />Harness 生成 Agent</label>
+          </section>
+
+          <section>
+            <div class="section-title">
+              <h2>AxF 后续流程</h2>
+              <span>Agent</span>
+            </div>
+            <label class="check"><input type="checkbox" name="artifacts" value="harness_generation_agent" />生成 Fuzz Harness</label>
           </section>
 
           <section class="grid">
             <div class="section-title wide">
-              <h2>限制</h2>
+              <h2>kRepo 抽取限制</h2>
               <span>默认即可</span>
             </div>
             <label>

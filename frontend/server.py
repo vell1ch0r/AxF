@@ -19,6 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = Path(__file__).with_name("static")
 DEFAULT_WORKSPACE = PROJECT_ROOT / "workspace" / "web" / "tasks"
 HARNESS_AGENT_ARTIFACT = "harness_generation_agent"
+DEFAULT_MODEL_TIMEOUT = 300
+DEFAULT_MODEL_MAX_RETRIES = 2
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,7 @@ class Task:
             "log": self.log,
             "events": self.events,
             "artifacts": self.artifacts,
+            "harness": _harness_summary(self.task_dir),
         }
 
 
@@ -188,10 +191,17 @@ class TaskStore:
             self._set(task_id, artifact=(step.artifact_name, step.artifact_path))
             for artifact_name, artifact_path in _extra_artifacts_for_step(step):
                 self._set(task_id, artifact=(artifact_name, artifact_path))
+            for event in _harness_events_for_step(step):
+                self._event(task_id, event["phase"], event["message"], artifact=event.get("artifact"))
+            failure = _harness_failure_message_for_step(step)
+            if failure:
+                self._set(task_id, status="failed", returncode=1, error=failure)
+                self._event(task_id, "failed", failure, artifact=step.artifact_name)
+                return
             self._event(task_id, step.name, f"{_artifact_label(step.artifact_name)} 已完成", artifact=step.artifact_name)
 
         self._set(task_id, status="completed", returncode=0)
-        self._event(task_id, "complete", "任务已完成")
+        self._event(task_id, "complete", _completion_message(task.task_dir))
 
     def _run_step(self, task_id: str, step: PipelineStep) -> int:
         try:
@@ -227,7 +237,7 @@ def build_steps(config: dict[str, Any], task_dir: Path) -> list[PipelineStep]:
     repo = _required(config, "repo")
     selected = _selected_artifacts(config)
     if not selected:
-        raise ValueError("请至少选择一个抽取产物")
+        raise ValueError("请至少选择一个 kRepo 产物或 AxF 后续流程")
     wants_harness_agent = _has_harness_agent(selected)
 
     common = ["--repo", repo]
@@ -291,6 +301,11 @@ def build_steps(config: dict[str, Any], task_dir: Path) -> list[PipelineStep]:
         _add_optional(command, "--model", config.get("model"))
         _add_optional(command, "--chat-url", config.get("chat_url"))
         _add_optional(command, "--api-key-env", config.get("api_key_env"))
+        _add_optional(command, "--timeout", config.get("model_timeout") or DEFAULT_MODEL_TIMEOUT)
+        _add_optional(command, "--max-retries", config.get("model_max_retries") or DEFAULT_MODEL_MAX_RETRIES)
+        _add_optional(command, "--clang", config.get("clang"))
+        _add_optional(command, "--max-repair-rounds", config.get("max_repair_rounds"))
+        _add_optional(command, "--compile-timeout", config.get("compile_timeout"))
         steps.append(
             PipelineStep(
                 HARNESS_AGENT_ARTIFACT,
@@ -313,6 +328,11 @@ def default_config() -> dict[str, Any]:
         "model": "glm-5.1",
         "chat_url": "",
         "api_key_env": "API_KEY",
+        "model_timeout": DEFAULT_MODEL_TIMEOUT,
+        "model_max_retries": DEFAULT_MODEL_MAX_RETRIES,
+        "clang": "",
+        "max_repair_rounds": 3,
+        "compile_timeout": 60,
         "max_deps": 50,
         "max_candidates": 12,
         "max_snippet_lines": 120,
@@ -510,6 +530,9 @@ def _artifact_label(name: str) -> str:
         "harness_build_ps1": "Windows 构建脚本",
         "harness_spec": "Harness 规格",
         "harness_dict": "Fuzz 字典",
+        "harness_compile_log": "编译日志",
+        "harness_run_log": "10 秒运行日志",
+        "harness_llm_transcript": "LLM 交互日志",
     }.get(name, name)
 
 
@@ -529,8 +552,157 @@ def _extra_artifacts_for_step(step: PipelineStep) -> list[tuple[str, Path]]:
         ("harness_build_ps1", harness_dir / "build.ps1"),
         ("harness_spec", harness_dir / "harness_spec.json"),
         ("harness_dict", harness_dir / "dict.txt"),
+        ("harness_compile_log", harness_dir / "compile.log"),
+        ("harness_run_log", harness_dir / "run.log"),
+        ("harness_llm_transcript", harness_dir / "llm_transcript.md"),
     ]
     return [(name, path) for name, path in candidates if path.exists()]
+
+
+def _harness_events_for_step(step: PipelineStep) -> list[dict[str, str]]:
+    if step.artifact_name != HARNESS_AGENT_ARTIFACT:
+        return []
+    spec = _read_harness_spec(step.artifact_path.parent)
+    events: list[dict[str, str]] = []
+    compile_info = spec.get("compile") if isinstance(spec.get("compile"), dict) else {}
+    run_info = spec.get("run") if isinstance(spec.get("run"), dict) else {}
+    if compile_info:
+        events.append(
+            {
+                "phase": "harness_compile",
+                "message": _compile_event_message(compile_info),
+                "artifact": "harness_compile_log",
+            }
+        )
+    if run_info:
+        events.append(
+            {
+                "phase": "harness_run",
+                "message": _run_event_message(run_info),
+                "artifact": "harness_run_log",
+            }
+        )
+    return events
+
+
+def _harness_summary(task_dir: Path) -> dict[str, Any]:
+    spec = _read_harness_spec(task_dir)
+    return {
+        "status": spec.get("status", ""),
+        "classification": spec.get("classification", ""),
+        "compile": spec.get("compile") if isinstance(spec.get("compile"), dict) else {},
+        "run": spec.get("run") if isinstance(spec.get("run"), dict) else {},
+    }
+
+
+def _harness_failure_message_for_step(step: PipelineStep) -> str:
+    if step.name != HARNESS_AGENT_ARTIFACT:
+        return ""
+    if not (step.artifact_path.parent / "harness" / "harness_spec.json").exists():
+        return "任务未完成：Harness 生成 Agent 未写出 harness_spec.json"
+    return _harness_failure_message(step.artifact_path.parent)
+
+
+def _harness_failure_message(task_dir: Path) -> str:
+    summary = _harness_summary(task_dir)
+    if not summary.get("status"):
+        return ""
+    compile_info = summary.get("compile") if isinstance(summary.get("compile"), dict) else {}
+    run_info = summary.get("run") if isinstance(summary.get("run"), dict) else {}
+    harness_status = str(summary.get("status") or "")
+    compile_status = str(compile_info.get("status") or "")
+    run_status = str(run_info.get("status") or "")
+
+    if run_status == "success":
+        return ""
+    if run_status == "failed":
+        return "任务未完成：libFuzzer 试跑失败"
+    if run_status == "timeout":
+        return "任务未完成：libFuzzer 试跑超时"
+    if compile_status == "failed":
+        return "任务未完成：Harness 编译失败"
+    if compile_status == "skipped":
+        return "任务未完成：Harness 未编译"
+    if compile_status == "success":
+        return "任务未完成：Harness 已编译但未完成 libFuzzer 试跑"
+    if harness_status == "unsupported":
+        return "任务未完成：目标不支持自动生成"
+    if harness_status == "needs_manual_fixture":
+        return "任务未完成：需要手工 Fixture"
+    if harness_status == "generated":
+        return "任务未完成：Harness 仅生成，尚未编译验证"
+    return ""
+
+
+def _completion_message(task_dir: Path) -> str:
+    failure = _harness_failure_message(task_dir)
+    if failure:
+        return failure
+    summary = _harness_summary(task_dir)
+    compile_info = summary.get("compile") if isinstance(summary.get("compile"), dict) else {}
+    run_info = summary.get("run") if isinstance(summary.get("run"), dict) else {}
+    harness_status = str(summary.get("status") or "")
+    run_status = str(run_info.get("status") or "")
+    compile_status = str(compile_info.get("status") or "")
+
+    if run_status == "success":
+        return "任务完成：libFuzzer 试跑通过"
+    if run_status == "failed":
+        return "任务完成：libFuzzer 试跑失败"
+    if run_status == "timeout":
+        return "任务完成：libFuzzer 试跑超时"
+    if compile_status == "success":
+        return "任务完成：Harness 编译通过"
+    if compile_status == "failed":
+        return "任务完成：Harness 编译失败"
+    if compile_status == "skipped":
+        return "任务完成：Harness 未编译"
+    if harness_status == "unsupported":
+        return "任务完成：目标不支持自动生成"
+    if harness_status == "needs_manual_fixture":
+        return "任务完成：需要手工 Fixture"
+    if harness_status:
+        return f"任务完成：Harness 状态 {harness_status}"
+    return "任务完成：kRepo 知识抽取完成"
+
+
+def _read_harness_spec(task_dir: Path) -> dict[str, Any]:
+    spec_path = task_dir / "harness" / "harness_spec.json"
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return spec if isinstance(spec, dict) else {}
+
+
+def _compile_event_message(compile_info: dict[str, Any]) -> str:
+    status = str(compile_info.get("status") or "")
+    attempts = compile_info.get("attempts")
+    attempt_count = len(attempts) if isinstance(attempts, list) else 0
+    attempt_text = f"（{attempt_count} 次尝试）" if attempt_count else ""
+    message = str(compile_info.get("message") or "").strip()
+    if status == "success":
+        return f"Harness 编译通过{attempt_text}"
+    if status == "failed":
+        return f"Harness 编译失败{attempt_text}，日志见编译日志"
+    if status == "skipped":
+        return f"Harness 编译跳过：{message or '未执行编译'}"
+    return f"Harness 编译状态：{status or '未知'}"
+
+
+def _run_event_message(run_info: dict[str, Any]) -> str:
+    status = str(run_info.get("status") or "")
+    seconds = run_info.get("seconds") or 10
+    message = str(run_info.get("message") or "").strip()
+    if status == "success":
+        return f"libFuzzer 试跑通过（{seconds} 秒），日志见 10 秒运行日志"
+    if status == "timeout":
+        return f"libFuzzer 试跑超时（{seconds} 秒），日志见 10 秒运行日志"
+    if status == "failed":
+        return f"libFuzzer 试跑失败（退出码 {run_info.get('returncode', '未知')}），日志见 10 秒运行日志"
+    if status == "skipped":
+        return f"libFuzzer 试跑跳过：{message or '未执行试跑'}"
+    return f"libFuzzer 试跑状态：{status or '未知'}"
 
 
 def _add_optional(command: list[str], flag: str, value: object) -> None:
